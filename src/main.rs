@@ -222,14 +222,21 @@ fn default_output_name() -> PathBuf {
 
 fn start_elapsed_ticker(started: Instant, running: Arc<AtomicBool>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        // initial display so the user sees immediate feedback
+        let mut last = Duration::ZERO;
+        print!("\rElapsed: {:02}:{:02}:{:02}", 0, 0, 0);
+        let _ = io::stdout().flush();
         while running.load(Ordering::Relaxed) {
             let elapsed = started.elapsed();
             let h = elapsed.as_secs() / 3600;
             let m = (elapsed.as_secs() / 60) % 60;
             let s = elapsed.as_secs() % 60;
-            print!("\rElapsed: {:02}:{:02}:{:02}", h, m, s);
-            let _ = io::stdout().flush();
-            thread::sleep(Duration::from_secs(1));
+            if elapsed != last {
+                print!("\rElapsed: {:02}:{:02}:{:02}", h, m, s);
+                let _ = io::stdout().flush();
+                last = elapsed;
+            }
+            thread::sleep(Duration::from_millis(250));
         }
         println!();
     })
@@ -255,7 +262,7 @@ fn start_hotkeys(writer: Arc<Mutex<File>>, running: Arc<AtomicBool>) -> thread::
         let stdin = io::stdin();
         let mut buf = String::new();
         let mut muted = false;
-        println!("Hotkeys: type 'm' then Enter to toggle mic mute/unmute.");
+        println!("Hotkeys active: type 'm' then Enter to toggle mic mute/unmute.");
         while running.load(Ordering::Relaxed) {
             buf.clear();
             if stdin.read_line(&mut buf).is_err() {
