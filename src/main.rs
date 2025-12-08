@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -231,23 +231,31 @@ fn start_elapsed_ticker(
     mic_muted: Option<Arc<AtomicBool>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        // Write directly to /dev/tty so output isn't swallowed by shell buffering/capture.
+        let mut out = open_tty().unwrap_or_else(|| io::stderr());
         let mut last = Duration::ZERO;
-        println!("Elapsed: 00:00:00{}", mic_muted.as_ref().map(|m| {
-            if m.load(Ordering::Relaxed) { " | mic: muted" } else { " | mic: on" }
-        }).unwrap_or(""));
+        let _ = writeln!(
+            out,
+            "Elapsed: 00:00:00{}",
+            mic_muted
+                .as_ref()
+                .map(|m| if m.load(Ordering::Relaxed) { " | mic: muted" } else { " | mic: on" })
+                .unwrap_or("")
+        );
+        let _ = out.flush();
         while running.load(Ordering::Relaxed) {
             let elapsed = started.elapsed();
             let h = elapsed.as_secs() / 3600;
             let m = (elapsed.as_secs() / 60) % 60;
             let s = elapsed.as_secs() % 60;
             if elapsed != last {
-                if let Some(muted) = mic_muted.as_ref() {
+                let _ = if let Some(muted) = mic_muted.as_ref() {
                     let state = if muted.load(Ordering::Relaxed) { "muted" } else { "on" };
-                    println!("Elapsed: {:02}:{:02}:{:02} | mic: {}", h, m, s, state);
+                    writeln!(out, "Elapsed: {:02}:{:02}:{:02} | mic: {}", h, m, s, state)
                 } else {
-                    println!("Elapsed: {:02}:{:02}:{:02}", h, m, s);
-                }
-                let _ = io::stdout().flush();
+                    writeln!(out, "Elapsed: {:02}:{:02}:{:02}", h, m, s)
+                };
+                let _ = out.flush();
                 last = elapsed;
             }
             thread::sleep(Duration::from_millis(250));
@@ -330,6 +338,23 @@ fn open_fifo_writer(path: &Path) -> Result<File> {
         }
         return Err(err.into());
     }
+}
+
+fn open_tty() -> Option<io::Stderr> {
+    // Use /dev/tty when available to avoid shell buffering/capture issues.
+    fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .ok()
+        .map(|f| {
+            let fd = f.as_raw_fd();
+            // Keep tty fd alive by forgetting the File after dup to stderr.
+            unsafe {
+                libc::dup2(fd, libc::STDERR_FILENO);
+            }
+            std::mem::forget(f);
+            io::stderr()
+        })
 }
 
 fn run_ffmpeg(
