@@ -11,6 +11,9 @@ Passive call recorder for PipeWire. It taps the default output monitor (remote a
 ```bash
 cargo build --release
 # binary: target/release/rcrd
+
+# optional: install to ~/.local/bin
+install -Dm755 target/release/rcrd ~/.local/bin/rcrd
 ```
 
 ## Usage

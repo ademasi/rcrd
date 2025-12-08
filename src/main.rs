@@ -1,10 +1,17 @@
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use serde_json::Value;
+use std::os::unix::process::ExitStatusExt;
 
 /// Record a call (Teams, Zoom, etc.) by tapping the current PipeWire sink monitor and microphone.
 #[derive(Parser, Debug)]
@@ -64,9 +71,25 @@ fn main() -> Result<()> {
     if let Some(dur) = args.duration {
         println!("  duration : {dur}s");
     }
-    println!("Press Ctrl+C to stop.");
+    let started_wall = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let started_instant = Instant::now();
+    println!("  started  : {}", chrono_time(started_wall));
+    println!("Press Ctrl+C to stop. Showing elapsed time…");
 
+    let running = Arc::new(AtomicBool::new(true));
+    let ticker = start_elapsed_ticker(started_instant, running.clone());
     run_ffmpeg(&monitor, source.as_deref(), &outfile, args.duration)?;
+    running.store(false, Ordering::Relaxed);
+    let _ = ticker.join();
+    let elapsed = started_instant.elapsed();
+    println!(
+        "Finished. Elapsed: {:02}:{:02}:{:02}",
+        elapsed.as_secs() / 3600,
+        (elapsed.as_secs() / 60) % 60,
+        elapsed.as_secs() % 60
+    );
     Ok(())
 }
 
@@ -161,12 +184,28 @@ fn default_output_name() -> PathBuf {
     PathBuf::from(format!("rcrd-call-{datetime}.ogg"))
 }
 
+fn start_elapsed_ticker(started: Instant, running: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while running.load(Ordering::Relaxed) {
+            let elapsed = started.elapsed();
+            let h = elapsed.as_secs() / 3600;
+            let m = (elapsed.as_secs() / 60) % 60;
+            let s = elapsed.as_secs() % 60;
+            print!("\rElapsed: {:02}:{:02}:{:02}", h, m, s);
+            let _ = io::stdout().flush();
+            thread::sleep(Duration::from_secs(1));
+        }
+        println!();
+    })
+}
+
 fn run_ffmpeg(monitor: &str, mic: Option<&str>, outfile: &PathBuf, duration: Option<u32>) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-nostdin"]);
     if let Some(d) = duration {
         cmd.args(["-t", &d.to_string()]);
     }
+    cmd.args(["-nostats", "-loglevel", "warning"]);
     cmd.args(["-f", "pulse", "-i", monitor]);
     if let Some(mic_name) = mic {
         cmd.args(["-f", "pulse", "-i", mic_name]);
@@ -199,8 +238,16 @@ fn run_ffmpeg(monitor: &str, mic: Option<&str>, outfile: &PathBuf, duration: Opt
     cmd.arg(outfile);
 
     let status = cmd.status().context("failed to spawn ffmpeg")?;
-    if !status.success() {
-        bail!("ffmpeg exited with {}", status);
+    if status.success() {
+        return Ok(());
     }
-    Ok(())
+    if let Some(sig) = status.signal() {
+        // Treat SIGINT (Ctrl+C) as a clean shutdown.
+        if sig == 2 {
+            println!();
+            return Ok(());
+        }
+        bail!("ffmpeg terminated by signal {sig}");
+    }
+    bail!("ffmpeg exited with {}", status);
 }
