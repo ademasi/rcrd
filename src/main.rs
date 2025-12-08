@@ -1,9 +1,13 @@
+use std::ffi::CString;
+use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::FromRawFd;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -36,6 +40,10 @@ struct Args {
     /// Do not record microphone; capture only the remote/output side.
     #[arg(long, default_value_t = false)]
     no_mic: bool,
+
+    /// Enable interactive mic mute/unmute hotkey (type 'm' then Enter).
+    #[arg(long, default_value_t = false)]
+    hotkeys: bool,
 }
 
 fn main() -> Result<()> {
@@ -78,11 +86,36 @@ fn main() -> Result<()> {
     println!("  started  : {}", chrono_time(started_wall));
     println!("Press Ctrl+C to stop. Showing elapsed time…");
 
+    // Set up interactive mic control if requested and mic is present.
+    let mic_control = if source.is_some() && args.hotkeys {
+        Some(setup_mic_control()?)
+    } else {
+        None
+    };
+
     let running = Arc::new(AtomicBool::new(true));
     let ticker = start_elapsed_ticker(started_instant, running.clone());
-    run_ffmpeg(&monitor, source.as_deref(), &outfile, args.duration)?;
+    let hotkeys_handle = if let Some(mc) = mic_control.as_ref() {
+        Some(start_hotkeys(mc.writer.clone(), running.clone()))
+    } else {
+        None
+    };
+
+    run_ffmpeg(
+        &monitor,
+        source.as_deref(),
+        mic_control.as_ref().map(|mc| mc.fifo_path.as_path()),
+        &outfile,
+        args.duration,
+    )?;
     running.store(false, Ordering::Relaxed);
     let _ = ticker.join();
+    if let Some(h) = hotkeys_handle {
+        let _ = h.join();
+    }
+    if let Some(mc) = mic_control {
+        let _ = fs::remove_file(mc.fifo_path);
+    }
     let elapsed = started_instant.elapsed();
     println!(
         "Finished. Elapsed: {:02}:{:02}:{:02}",
@@ -199,7 +232,85 @@ fn start_elapsed_ticker(started: Instant, running: Arc<AtomicBool>) -> thread::J
     })
 }
 
-fn run_ffmpeg(monitor: &str, mic: Option<&str>, outfile: &PathBuf, duration: Option<u32>) -> Result<()> {
+struct MicControl {
+    fifo_path: PathBuf,
+    writer: Arc<Mutex<File>>,
+}
+
+fn setup_mic_control() -> Result<MicControl> {
+    let dir = std::env::temp_dir().join("rcrd-mic");
+    fs::create_dir_all(&dir)?;
+    let fifo_path = dir.join(format!("mic-{}.fifo", std::process::id()));
+    mkfifo(&fifo_path)?;
+    let writer = Arc::new(Mutex::new(open_fifo_writer(&fifo_path)?));
+    write_mic_volume(&writer, 1.0)?;
+    Ok(MicControl { fifo_path, writer })
+}
+
+fn start_hotkeys(writer: Arc<Mutex<File>>, running: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut buf = String::new();
+        let mut muted = false;
+        println!("Hotkeys: type 'm' then Enter to toggle mic mute/unmute.");
+        while running.load(Ordering::Relaxed) {
+            buf.clear();
+            if stdin.read_line(&mut buf).is_err() {
+                break;
+            }
+            let cmd = buf.trim().to_ascii_lowercase();
+            if cmd == "m" || cmd == "mute" {
+                muted = !muted;
+                let vol = if muted { 0.0 } else { 1.0 };
+                if let Err(e) = write_mic_volume(&writer, vol) {
+                    eprintln!("Failed to send mute command: {e}");
+                    break;
+                }
+                println!("Mic {}", if muted { "muted" } else { "unmuted" });
+            }
+        }
+    })
+}
+
+fn write_mic_volume(writer: &Mutex<File>, volume: f32) -> Result<()> {
+    let mut w = writer.lock().unwrap();
+    writeln!(w, "0.0 volume@micvol volume {}", volume)?;
+    w.flush()?;
+    Ok(())
+}
+
+fn mkfifo(path: &Path) -> Result<()> {
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    let res = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    if res != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+fn open_fifo_writer(path: &Path) -> Result<File> {
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    loop {
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+        if fd >= 0 {
+            return Ok(unsafe { File::from_raw_fd(fd) });
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENXIO) {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        return Err(err.into());
+    }
+}
+
+fn run_ffmpeg(
+    monitor: &str,
+    mic: Option<&str>,
+    mic_cmd_path: Option<&Path>,
+    outfile: &PathBuf,
+    duration: Option<u32>,
+) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-nostdin"]);
     if let Some(d) = duration {
@@ -209,18 +320,37 @@ fn run_ffmpeg(monitor: &str, mic: Option<&str>, outfile: &PathBuf, duration: Opt
     cmd.args(["-f", "pulse", "-i", monitor]);
     if let Some(mic_name) = mic {
         cmd.args(["-f", "pulse", "-i", mic_name]);
-        cmd.args([
-            "-filter_complex",
-            "[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=3",
-            "-ac",
-            "2",
-            "-ar",
-            "48000",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            "128k",
-        ]);
+        if let Some(cmd_path) = mic_cmd_path {
+            let filter = format!(
+                "[1:a]asendcmd=f={},volume@micvol=volume=1[mic];[0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3",
+                cmd_path.display()
+            );
+            cmd.args([
+                "-filter_complex",
+                &filter,
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "128k",
+            ]);
+        } else {
+            cmd.args([
+                "-filter_complex",
+                "[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=3",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "128k",
+            ]);
+        }
     } else {
         cmd.args([
             "-map",
