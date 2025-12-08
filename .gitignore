@@ -1,0 +1,14 @@
+# Build artifacts
+/target
+
+# Local binaries
+/rcrd
+
+# Editor/backup cruft
+**/*.rs.bk
+*~
+
+# Local recordings
+*.ogg
+*.flac
+*.mka
