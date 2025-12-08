@@ -231,15 +231,14 @@ fn start_elapsed_ticker(
     mic_muted: Option<Arc<AtomicBool>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut sink = status_sink();
         let mut last = Duration::ZERO;
-        sink.write_line(&format!(
+        println!(
             "Elapsed: 00:00:00{}",
             mic_muted
                 .as_ref()
                 .map(|m| if m.load(Ordering::Relaxed) { " | mic: muted" } else { " | mic: on" })
                 .unwrap_or("")
-        ));
+        );
         while running.load(Ordering::Relaxed) {
             let elapsed = started.elapsed();
             let h = elapsed.as_secs() / 3600;
@@ -248,13 +247,14 @@ fn start_elapsed_ticker(
             if elapsed != last {
                 if let Some(muted) = mic_muted.as_ref() {
                     let state = if muted.load(Ordering::Relaxed) { "muted" } else { "on" };
-                    sink.write_line(&format!("Elapsed: {:02}:{:02}:{:02} | mic: {}", h, m, s, state));
+                    println!("Elapsed: {:02}:{:02}:{:02} | mic: {}", h, m, s, state);
                 } else {
-                    sink.write_line(&format!("Elapsed: {:02}:{:02}:{:02}", h, m, s));
+                    println!("Elapsed: {:02}:{:02}:{:02}", h, m, s);
                 }
+                let _ = io::stdout().flush();
                 last = elapsed;
             }
-            thread::sleep(Duration::from_millis(250));
+            thread::sleep(Duration::from_millis(1000));
         }
     })
 }
@@ -306,7 +306,7 @@ fn start_hotkeys(
 
 fn write_mic_volume(writer: &Mutex<File>, volume: f32) -> Result<()> {
     let mut w = writer.lock().unwrap();
-    writeln!(w, "0.0 volume@micvol volume={}", volume)?;
+    writeln!(w, "0.0 volume@micvol volume {}", volume)?;
     w.flush()?;
     Ok(())
 }
@@ -336,34 +336,6 @@ fn open_fifo_writer(path: &Path) -> Result<File> {
     }
 }
 
-enum StatusSink {
-    Tty(File),
-    Stderr,
-}
-
-impl StatusSink {
-    fn write_line(&mut self, line: &str) {
-        match self {
-            StatusSink::Tty(file) => {
-                let _ = writeln!(file, "{line}");
-                let _ = file.flush();
-            }
-            StatusSink::Stderr => {
-                let mut err = io::stderr();
-                let _ = writeln!(err, "{line}");
-                let _ = err.flush();
-            }
-        }
-    }
-}
-
-fn status_sink() -> StatusSink {
-    if let Ok(file) = fs::OpenOptions::new().write(true).open("/dev/tty") {
-        StatusSink::Tty(file)
-    } else {
-        StatusSink::Stderr
-    }
-}
 
 fn run_ffmpeg(
     monitor: &str,
@@ -383,7 +355,7 @@ fn run_ffmpeg(
         cmd.args(["-f", "pulse", "-i", mic_name]);
         if let Some(cmd_path) = mic_cmd_path {
             let filter = format!(
-                "[1:a]asendcmd=f={},volume@micvol=volume=1[mic];[0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3",
+                "[1:a]asendcmd=filename={},volume@micvol=volume=1[mic];[0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3",
                 cmd_path.display()
             );
             cmd.args([
