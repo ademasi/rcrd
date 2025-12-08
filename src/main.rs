@@ -41,9 +41,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     no_mic: bool,
 
-    /// Enable interactive mic mute/unmute hotkey (type 'm' then Enter).
+    /// Disable interactive mic mute/unmute hotkeys (on by default).
     #[arg(long, default_value_t = false)]
-    hotkeys: bool,
+    no_hotkeys: bool,
 }
 
 fn main() -> Result<()> {
@@ -84,10 +84,13 @@ fn main() -> Result<()> {
         .unwrap_or(Duration::ZERO);
     let started_instant = Instant::now();
     println!("  started  : {}", chrono_time(started_wall));
+    if source.is_some() && !args.no_hotkeys {
+        println!("  hotkeys  : type 'm' then Enter to toggle mic mute/unmute.");
+    }
     println!("Press Ctrl+C to stop. Showing elapsed time…");
 
     // Set up interactive mic control if requested and mic is present.
-    let mic_control = if source.is_some() && args.hotkeys {
+    let mic_control = if source.is_some() && !args.no_hotkeys {
         Some(setup_mic_control()?)
     } else {
         None

@@ -29,9 +29,11 @@ install -Dm755 target/release/rcrd ~/.local/bin/rcrd
   ```bash
   ./target/release/rcrd --no-mic
   ```
-- Interactive mic mute/unmute hotkey (type `m` + Enter to toggle during recording):
+- Interactive mic mute/unmute hotkey (type `m` + Enter to toggle during recording, on by default; disable with `--no-hotkeys`):
   ```bash
-  ./target/release/rcrd --hotkeys
+  ./target/release/rcrd
+  # disable hotkeys explicitly:
+  ./target/release/rcrd --no-hotkeys
   ```
 - Override devices if auto-detection fails (monitor is `<sink>.monitor`):
   ```bash
