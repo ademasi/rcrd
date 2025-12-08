@@ -85,7 +85,7 @@ fn main() -> Result<()> {
     let started_instant = Instant::now();
     println!("  started  : {}", chrono_time(started_wall));
     if source.is_some() && !args.no_hotkeys {
-        println!("  hotkeys  : type 'm' then Enter to toggle mic mute/unmute.");
+        println!("  hotkeys  : press 'm' then Enter to toggle mic mute/unmute (capture only).");
     }
     println!("Press Ctrl+C to stop. Showing elapsed time…");
 
@@ -97,9 +97,14 @@ fn main() -> Result<()> {
     };
 
     let running = Arc::new(AtomicBool::new(true));
-    let ticker = start_elapsed_ticker(started_instant, running.clone());
+    let mic_muted = Arc::new(AtomicBool::new(false));
+    let ticker = start_elapsed_ticker(started_instant, running.clone(), Some(mic_muted.clone()));
     let hotkeys_handle = if let Some(mc) = mic_control.as_ref() {
-        Some(start_hotkeys(mc.writer.clone(), running.clone()))
+        Some(start_hotkeys(
+            mc.writer.clone(),
+            running.clone(),
+            mic_muted.clone(),
+        ))
     } else {
         None
     };
@@ -220,25 +225,33 @@ fn default_output_name() -> PathBuf {
     PathBuf::from(format!("rcrd-call-{datetime}.ogg"))
 }
 
-fn start_elapsed_ticker(started: Instant, running: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+fn start_elapsed_ticker(
+    started: Instant,
+    running: Arc<AtomicBool>,
+    mic_muted: Option<Arc<AtomicBool>>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        // initial display so the user sees immediate feedback
         let mut last = Duration::ZERO;
-        print!("\rElapsed: {:02}:{:02}:{:02}", 0, 0, 0);
-        let _ = io::stdout().flush();
+        eprint!("\rElapsed: {:02}:{:02}:{:02}", 0, 0, 0);
+        let _ = io::stderr().flush();
         while running.load(Ordering::Relaxed) {
             let elapsed = started.elapsed();
             let h = elapsed.as_secs() / 3600;
             let m = (elapsed.as_secs() / 60) % 60;
             let s = elapsed.as_secs() % 60;
             if elapsed != last {
-                print!("\rElapsed: {:02}:{:02}:{:02}", h, m, s);
-                let _ = io::stdout().flush();
+                if let Some(muted) = mic_muted.as_ref() {
+                    let state = if muted.load(Ordering::Relaxed) { "mic: muted" } else { "mic: on   " };
+                    eprint!("\rElapsed: {:02}:{:02}:{:02} | {}", h, m, s, state);
+                } else {
+                    eprint!("\rElapsed: {:02}:{:02}:{:02}", h, m, s);
+                }
+                let _ = io::stderr().flush();
                 last = elapsed;
             }
             thread::sleep(Duration::from_millis(250));
         }
-        println!();
+        eprintln!();
     })
 }
 
@@ -257,7 +270,11 @@ fn setup_mic_control() -> Result<MicControl> {
     Ok(MicControl { fifo_path, writer })
 }
 
-fn start_hotkeys(writer: Arc<Mutex<File>>, running: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+fn start_hotkeys(
+    writer: Arc<Mutex<File>>,
+    running: Arc<AtomicBool>,
+    mic_muted: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let stdin = io::stdin();
         let mut buf = String::new();
@@ -271,6 +288,7 @@ fn start_hotkeys(writer: Arc<Mutex<File>>, running: Arc<AtomicBool>) -> thread::
             let cmd = buf.trim().to_ascii_lowercase();
             if cmd == "m" || cmd == "mute" {
                 muted = !muted;
+                mic_muted.store(muted, Ordering::Relaxed);
                 let vol = if muted { 0.0 } else { 1.0 };
                 if let Err(e) = write_mic_volume(&writer, vol) {
                     eprintln!("Failed to send mute command: {e}");
