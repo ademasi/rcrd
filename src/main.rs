@@ -76,6 +76,9 @@ fn main() -> Result<()> {
     } else {
         println!("  mic      : (disabled)");
     }
+    if let Some(rev) = git_revision() {
+        println!("  commit   : {rev}");
+    }
     if let Some(dur) = args.duration {
         println!("  duration : {dur}s");
     }
@@ -180,6 +183,22 @@ fn detect_defaults() -> Result<Defaults> {
         }
     }
     Ok(defaults)
+}
+
+fn git_revision() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if rev.is_empty() {
+        None
+    } else {
+        Some(rev)
+    }
 }
 
 fn extract_name(val: Option<&Value>) -> Option<String> {
