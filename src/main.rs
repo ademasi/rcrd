@@ -232,8 +232,9 @@ fn start_elapsed_ticker(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut last = Duration::ZERO;
-        eprint!("\rElapsed: {:02}:{:02}:{:02}", 0, 0, 0);
-        let _ = io::stderr().flush();
+        println!("Elapsed: 00:00:00{}", mic_muted.as_ref().map(|m| {
+            if m.load(Ordering::Relaxed) { " | mic: muted" } else { " | mic: on" }
+        }).unwrap_or(""));
         while running.load(Ordering::Relaxed) {
             let elapsed = started.elapsed();
             let h = elapsed.as_secs() / 3600;
@@ -241,17 +242,16 @@ fn start_elapsed_ticker(
             let s = elapsed.as_secs() % 60;
             if elapsed != last {
                 if let Some(muted) = mic_muted.as_ref() {
-                    let state = if muted.load(Ordering::Relaxed) { "mic: muted" } else { "mic: on   " };
-                    eprint!("\rElapsed: {:02}:{:02}:{:02} | {}", h, m, s, state);
+                    let state = if muted.load(Ordering::Relaxed) { "muted" } else { "on" };
+                    println!("Elapsed: {:02}:{:02}:{:02} | mic: {}", h, m, s, state);
                 } else {
-                    eprint!("\rElapsed: {:02}:{:02}:{:02}", h, m, s);
+                    println!("Elapsed: {:02}:{:02}:{:02}", h, m, s);
                 }
-                let _ = io::stderr().flush();
+                let _ = io::stdout().flush();
                 last = elapsed;
             }
             thread::sleep(Duration::from_millis(250));
         }
-        eprintln!();
     })
 }
 
@@ -302,7 +302,7 @@ fn start_hotkeys(
 
 fn write_mic_volume(writer: &Mutex<File>, volume: f32) -> Result<()> {
     let mut w = writer.lock().unwrap();
-    writeln!(w, "0.0 volume@micvol volume {}", volume)?;
+    writeln!(w, "0.0 volume@micvol volume={}", volume)?;
     w.flush()?;
     Ok(())
 }
