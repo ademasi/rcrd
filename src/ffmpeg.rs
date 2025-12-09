@@ -93,7 +93,7 @@ pub fn spawn_ffmpeg(
 
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        let re = Regex::new(r"RMS level dB:\s+([-0-9.]+)").unwrap();
+        let re = Regex::new(r"RMS level dB:\s+(-?inf|[-0-9.]+)").unwrap();
 
         for line in reader.lines() {
             if let Ok(l) = line {
@@ -106,10 +106,12 @@ pub fn spawn_ffmpeg(
 
                 if let Some(caps) = re.captures(&l) {
                     if let Some(m) = caps.get(1) {
-                        if let Ok(val) = m.as_str().parse::<f32>() {
-                            if let Ok(mut lock) = audio_level.lock() {
-                                *lock = val;
-                            }
+                        let val = match m.as_str() {
+                            "-inf" | "inf" => -90.0,
+                            other => other.parse::<f32>().unwrap_or(-90.0),
+                        };
+                        if let Ok(mut lock) = audio_level.lock() {
+                            *lock = val;
                         }
                     }
                 }
