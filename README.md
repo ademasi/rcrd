@@ -17,7 +17,7 @@ install -Dm755 target/release/rcrd ~/.local/bin/rcrd
 ```
 
 ## Usage
-- Record indefinitely until Ctrl+C:
+- Record indefinitely until Ctrl+C (TUI shows elapsed time, VU meter, and logs):
   ```bash
   ./target/release/rcrd
   ```
@@ -29,18 +29,13 @@ install -Dm755 target/release/rcrd ~/.local/bin/rcrd
   ```bash
   ./target/release/rcrd --no-mic
   ```
-- Interactive mic mute/unmute hotkey (type `m` + Enter to toggle during recording, on by default; disable with `--no-hotkeys`):
-  ```bash
-  ./target/release/rcrd
-  # disable hotkeys explicitly:
-  ./target/release/rcrd --no-hotkeys
-  ```
 - Override devices if auto-detection fails (monitor is `<sink>.monitor`):
   ```bash
   ./target/release/rcrd --sink <sink_node.name> --source <source_node.name>
   ```
+- Controls in the TUI: `q` or `Esc` to quit, `Ctrl+C` to quit, `m` to toggle mic mute/unmute, `b` to add a marker.
 
 ## Behavior
-- Default output name: `rcrd-call-YYYYmmdd-HHMMSS.ogg`
+- Default output name: `rcrd-call-YYYYmmdd-HHMMSS.ogg` (zero-padded, no spaces)
 - Stops automatically if `--duration` is provided, otherwise stop with Ctrl+C.
 - Mixing uses `amix` to keep remote and mic audio in sync; when `--no-mic` is set, it records only the sink monitor.
