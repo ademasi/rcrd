@@ -125,7 +125,8 @@ fn ui(f: &mut ratatui::Frame, state: &RecorderState) {
                 Constraint::Length(5), // Info
                 Constraint::Length(3), // Status
                 Constraint::Length(3), // VU Meter
-                Constraint::Length(6), // Logs/help
+                Constraint::Length(3), // Controls
+                Constraint::Min(4),    // Logs
             ]
             .as_ref(),
         )
@@ -231,20 +232,26 @@ Rev : {}",
         .ratio(ratio);
     f.render_widget(gauge, chunks[3]);
 
-    let mut log_lines = if let Ok(logs) = state.recent_logs.lock() {
+    let controls = Paragraph::new(
+        "Controls: q / Esc / Ctrl+C = Quit   m = Mute/Unmute mic   b = Add marker\n\
+         Files: output OGG in cwd; markers .json beside it\n\
+         Devices: monitor from default sink, mic from default source (or --no-mic)",
+    )
+    .style(Style::default().fg(Color::Gray))
+    .block(Block::default().title(" Controls ").borders(Borders::ALL));
+    f.render_widget(controls, chunks[4]);
+
+    let log_lines = if let Ok(logs) = state.recent_logs.lock() {
         logs.clone()
     } else {
         Vec::new()
     };
-    log_lines.push(
-        "Controls: [q] Quit  [m] Toggle Mic Mute  [b] Add Bookmark  Ctrl+C to stop.".to_string(),
-    );
     let help = Paragraph::new(Text::raw(log_lines.join("\n")))
         .style(Style::default().fg(Color::Gray))
         .block(
             Block::default()
-                .title(" Logs / Help ")
+                .title(" FFmpeg Log (recent) ")
                 .borders(Borders::ALL),
         );
-    f.render_widget(help, chunks[4]);
+    f.render_widget(help, chunks[5]);
 }

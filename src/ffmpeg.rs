@@ -52,32 +52,28 @@ pub fn spawn_ffmpeg(
 
     cmd.args(["-f", "pulse", "-i", monitor]);
 
-    let mut filter_complex = String::new();
-
-    if let Some(mic_name) = mic {
+    let filter_complex = if let Some(mic_name) = mic {
         cmd.args(["-f", "pulse", "-i", mic_name]);
         let mic_cmd = if let Some(cmd_path) = mic_cmd_path {
-            format!("filename='{}'", cmd_path.display())
+            format!("filename={}", cmd_path.display())
         } else {
-            String::from("filename=''")
+            String::from("filename=")
         };
 
-        filter_complex.push_str(&format!(
+        format!(
             "[1:a]asendcmd={mic_cmd},volume@micvol=volume=1.0[mic];\
              [0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3[mix];\
-             [mix]split[out_file][analysis];\
+             [mix]asplit=2[out_file][analysis];\
              [analysis]astats=metadata=1:reset=1,anullsink"
-        ));
-
-        cmd.args(["-filter_complex", &filter_complex]);
-        cmd.args(["-map", "[out_file]"]);
+        )
     } else {
-        filter_complex.push_str(
-            "[0:a]split[out_file][analysis];[analysis]astats=metadata=1:reset=1,anullsink",
-        );
-        cmd.args(["-filter_complex", &filter_complex]);
-        cmd.args(["-map", "[out_file]"]);
-    }
+        String::from(
+            "[0:a]asplit=2[out_file][analysis];[analysis]astats=metadata=1:reset=1,anullsink",
+        )
+    };
+
+    cmd.args(["-filter_complex", &filter_complex]);
+    cmd.args(["-map", "[out_file]"]);
 
     cmd.args([
         "-ac", "2", "-ar", "48000", "-c:a", "libopus", "-b:a", "128k",
