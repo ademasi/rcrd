@@ -17,7 +17,7 @@ install -Dm755 target/release/rcrd ~/.local/bin/rcrd
 ```
 
 ## Usage
-- Record indefinitely until Ctrl+C (TUI shows elapsed time, VU meter, and logs):
+- Record indefinitely until Ctrl+C (TUI shows elapsed time and logs):
   ```bash
   ./target/release/rcrd
   ```

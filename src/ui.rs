@@ -1,6 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,11 +17,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Paragraph},
 };
 
 use crate::Marker;
-use crate::ffmpeg::write_mic_volume;
+use crate::ffmpeg::{Levels, write_mic_volume};
+use crate::transcript::TransSegment;
 
 pub struct RecorderState {
     pub start_time: Instant,
@@ -32,9 +34,17 @@ pub struct RecorderState {
     pub monitor_source: String,
     pub mic_source: Option<String>,
     pub git_rev: Option<String>,
-    pub audio_level: Arc<Mutex<f32>>,
+    pub audio_level: Arc<Mutex<Levels>>,
     pub markers: Vec<Marker>,
     pub recent_logs: Arc<Mutex<Vec<String>>>,
+    pub transcript: Arc<Mutex<Vec<TransSegment>>>,
+    pub transcription_active: bool,
+    pub transcription_flag: Arc<AtomicBool>,
+    pub transcription_stop: Arc<AtomicBool>,
+    pub transcription_reset: Arc<AtomicBool>,
+    pub base_offset_ms: Arc<std::sync::atomic::AtomicI64>,
+    pub language: Arc<Mutex<String>>,
+    pub whisper_model: Option<PathBuf>,
 }
 
 pub fn run_app(mut state: RecorderState, child: &mut Child) -> Result<RecorderState> {
@@ -71,9 +81,11 @@ fn run_loop<B: Backend>(
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         state.running = false;
+                        state.transcription_stop.store(true, Ordering::Relaxed);
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         state.running = false;
+                        state.transcription_stop.store(true, Ordering::Relaxed);
                     }
                     KeyCode::Char('m') => {
                         if let Some(cmd_path) = &state.mic_cmd_file {
@@ -88,6 +100,40 @@ fn run_loop<B: Backend>(
                             timestamp: elapsed,
                             note: format!("Marker #{}", state.markers.len() + 1),
                         });
+                    }
+                    KeyCode::Char('t') => {
+                        if state.whisper_model.is_some() {
+                            state.transcription_active = !state.transcription_active;
+                            state
+                                .transcription_flag
+                                .store(state.transcription_active, Ordering::Relaxed);
+                            if state.transcription_active {
+                                let elapsed_ms = state
+                                    .start_time
+                                    .elapsed()
+                                    .as_millis()
+                                    .try_into()
+                                    .unwrap_or(0);
+                                state
+                                    .base_offset_ms
+                                    .store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+                                state.transcription_reset.store(true, Ordering::Relaxed);
+                            }
+                        } else if let Ok(mut logs) = state.recent_logs.lock() {
+                            logs.push("Transcription model not configured".into());
+                        }
+                    }
+                    KeyCode::Char('l') => {
+                        if let Ok(mut lang) = state.language.lock() {
+                            *lang = if *lang == "en" {
+                                "fr".into()
+                            } else {
+                                "en".into()
+                            };
+                            if let Ok(mut logs) = state.recent_logs.lock() {
+                                logs.push(format!("Language set to {}", *lang));
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -113,6 +159,7 @@ fn run_loop<B: Backend>(
             break;
         }
     }
+    state.transcription_stop.store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -124,9 +171,8 @@ fn ui(f: &mut ratatui::Frame, state: &RecorderState) {
                 Constraint::Length(3), // Header
                 Constraint::Length(5), // Info
                 Constraint::Length(3), // Status
-                Constraint::Length(3), // VU Meter
                 Constraint::Length(3), // Controls
-                Constraint::Min(4),    // Logs
+                Constraint::Min(4),    // Logs / Transcript
             ]
             .as_ref(),
         )
@@ -213,45 +259,60 @@ Rev : {}",
     let status_p = Paragraph::new(status_line).block(status_block);
     f.render_widget(status_p, chunks[2]);
 
-    // VU Meter
-    let level = if let Ok(l) = state.audio_level.lock() {
-        *l
-    } else {
-        0.0
-    };
-    // Map RMS dB roughly to 0-1 range. Silence is usually -60dB or less.
-    let ratio = ((level + 60.0) / 60.0).clamp(0.0, 1.0) as f64;
-
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(" Audio Level ")
-                .borders(Borders::ALL),
-        )
-        .gauge_style(Style::default().fg(Color::Green))
-        .ratio(ratio);
-    f.render_widget(gauge, chunks[3]);
-
     let controls = Paragraph::new(
-        "Controls: q / Esc / Ctrl+C = Quit   m = Mute/Unmute mic   b = Add marker\n\
+        "Controls: q / Esc / Ctrl+C = Quit   m = Mute/Unmute mic   b = Add marker   t = Toggle live transcript   l = Toggle lang (en/fr)\n\
          Files: output OGG in cwd; markers .json beside it\n\
          Devices: monitor from default sink, mic from default source (or --no-mic)",
     )
     .style(Style::default().fg(Color::Gray))
     .block(Block::default().title(" Controls ").borders(Borders::ALL));
-    f.render_widget(controls, chunks[4]);
+    f.render_widget(controls, chunks[3]);
 
-    let log_lines = if let Ok(logs) = state.recent_logs.lock() {
-        logs.clone()
+    if state.transcription_active && state.whisper_model.is_some() {
+        let lines = if let Ok(t) = state.transcript.lock() {
+            let len = t.len();
+            let start = len.saturating_sub(10);
+            t.iter()
+                .skip(start)
+                .map(|seg| {
+                    let h = seg.start_ms / 3_600_000;
+                    let m = (seg.start_ms / 60_000) % 60;
+                    let s = (seg.start_ms / 1000) % 60;
+                    let ms = seg.start_ms % 1000;
+                    format!("{:02}:{:02}:{:02}.{:03} {}", h, m, s, ms, seg.text)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let txt = if lines.is_empty() {
+            "Transcription running…".to_string()
+        } else {
+            lines.join("\n")
+        };
+        let transcript = Paragraph::new(Text::raw(txt))
+            .style(Style::default().fg(Color::Gray))
+            .block(
+                Block::default()
+                    .title(" Live Transcript ")
+                    .borders(Borders::ALL),
+            );
+        f.render_widget(transcript, chunks[4]);
     } else {
-        Vec::new()
-    };
-    let help = Paragraph::new(Text::raw(log_lines.join("\n")))
-        .style(Style::default().fg(Color::Gray))
-        .block(
-            Block::default()
-                .title(" FFmpeg Log (recent) ")
-                .borders(Borders::ALL),
-        );
-    f.render_widget(help, chunks[5]);
+        let log_lines = if let Ok(logs) = state.recent_logs.lock() {
+            let len = logs.len();
+            let start = len.saturating_sub(10);
+            logs.iter().skip(start).cloned().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let help = Paragraph::new(Text::raw(log_lines.join("\n")))
+            .style(Style::default().fg(Color::Gray))
+            .block(
+                Block::default()
+                    .title(" FFmpeg Log (recent) ")
+                    .borders(Borders::ALL),
+            );
+        f.render_widget(help, chunks[4]);
+    }
 }

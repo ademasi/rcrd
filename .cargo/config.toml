@@ -1,0 +1,2 @@
+[env]
+BLAS_INCLUDE_DIRS = "/usr/include/openblas"

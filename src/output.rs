@@ -1,14 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, SystemTime};
 
-pub fn default_output_name() -> PathBuf {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    let secs = now.as_secs() as i64;
-    let tm = time::OffsetDateTime::from_unix_timestamp(secs)
-        .unwrap_or_else(|_| time::OffsetDateTime::UNIX_EPOCH);
+pub fn default_output_name(prefix: &str) -> PathBuf {
+    let tm = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let datetime = format!(
         "{:04}{:02}{:02}-{:02}{:02}{:02}",
         tm.year(),
@@ -18,7 +12,7 @@ pub fn default_output_name() -> PathBuf {
         tm.minute(),
         tm.second()
     );
-    PathBuf::from(format!("rcrd-call-{datetime}.ogg"))
+    PathBuf::from(format!("{prefix}{datetime}.ogg"))
 }
 
 pub fn git_revision() -> Option<String> {

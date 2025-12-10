@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::{Context, Result};
-use regex::Regex;
 
 pub fn prepare_mic_control() -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("rcrd-mic");
@@ -40,7 +39,6 @@ pub fn spawn_ffmpeg(
     mic_cmd_path: Option<&Path>,
     outfile: &Path,
     duration: Option<u32>,
-    audio_level: Arc<Mutex<f32>>,
     recent_logs: Arc<Mutex<Vec<String>>>,
     debug: bool,
 ) -> Result<Child> {
@@ -62,13 +60,10 @@ pub fn spawn_ffmpeg(
 
         format!(
             "[1:a]asendcmd={mic_cmd},volume@micvol=volume=1.0[mic];\
-             [0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3[mix];\
-             [mix]asplit=2[out_file][analysis];\
-             [analysis]astats=metadata=1:reset=1,anullsink"
+             [0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3[mix]"
         )
     } else {
-        String::from(
-            "[0:a]asplit=2[out_file][analysis];[analysis]astats=metadata=1:reset=1,anullsink",
+        String::from("[0:a]"
         )
     };
 
@@ -93,7 +88,6 @@ pub fn spawn_ffmpeg(
 
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        let re = Regex::new(r"RMS level dB:\s+(-?inf|[-0-9.]+)").unwrap();
 
         for line in reader.lines() {
             if let Ok(l) = line {
@@ -102,18 +96,6 @@ pub fn spawn_ffmpeg(
                         logs.remove(0);
                     }
                     logs.push(l.clone());
-                }
-
-                if let Some(caps) = re.captures(&l) {
-                    if let Some(m) = caps.get(1) {
-                        let val = match m.as_str() {
-                            "-inf" | "inf" => -90.0,
-                            other => other.parse::<f32>().unwrap_or(-90.0),
-                        };
-                        if let Ok(mut lock) = audio_level.lock() {
-                            *lock = val;
-                        }
-                    }
                 }
             }
         }
