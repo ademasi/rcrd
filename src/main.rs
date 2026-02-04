@@ -1,9 +1,11 @@
+mod audio_mix;
 mod config;
 mod devices;
 mod ffmpeg;
 mod output;
 mod transcript;
 mod ui;
+mod util;
 
 use std::fs::File;
 use std::io::Write;
@@ -17,7 +19,8 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use serde::Serialize;
 
-use crate::config::load_config;
+use crate::audio_mix::{setup_mix_source, TranscriptionMix};
+use crate::config::{config_path, load_config, Config};
 use crate::devices::detect_defaults;
 use crate::ffmpeg::{prepare_mic_control, spawn_ffmpeg};
 use crate::output::{default_output_name, git_revision};
@@ -67,6 +70,10 @@ struct Args {
     /// Whisper backend: vulkan or openblas (defaults to config or vulkan).
     #[arg(long)]
     backend: Option<String>,
+
+    /// Path to whisper-stream binary (overrides config).
+    #[arg(long)]
+    whisper_stream: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -77,7 +84,18 @@ pub struct Marker {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let cfg = load_config().unwrap_or_default();
+    let cfg_path = config_path();
+    let cfg = match load_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to load config {}: {}. Using defaults.",
+                cfg_path.display(),
+                e
+            );
+            Config::default()
+        }
+    };
     let defaults = detect_defaults().unwrap_or_default();
 
     let sink = args
@@ -103,7 +121,6 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let audio_level = Arc::new(Mutex::new(ffmpeg::Levels::default()));
     let recent_logs = Arc::new(Mutex::new(Vec::new()));
     let transcript = Arc::new(Mutex::new(Vec::<TransSegment>::new()));
     let transcription_flag = Arc::new(AtomicBool::new(false));
@@ -111,6 +128,9 @@ fn main() -> Result<()> {
     let transcription_reset = Arc::new(AtomicBool::new(false));
     let base_offset_ms = Arc::new(std::sync::atomic::AtomicI64::new(0));
     let whisper_model = args.model.or(cfg.whisper_model.clone());
+    let whisper_stream_bin = args
+        .whisper_stream
+        .or(cfg.whisper_stream_path.clone());
     let backend = args
         .backend
         .or(Some(cfg.backend.clone()))
@@ -120,7 +140,15 @@ fn main() -> Result<()> {
             .or(cfg.language.clone())
             .unwrap_or_else(|| "en".into()),
     ));
-    let want_transcript = whisper_model.is_some();
+    let model_exists = whisper_model
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    let stream_exists = whisper_stream_bin
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    let want_transcript = model_exists && stream_exists;
     let whisper_threads = 8;
 
     if args.debug {
@@ -129,7 +157,14 @@ fn main() -> Result<()> {
         println!("Monitor: {}", monitor);
         println!("Mic: {:?}", source_name);
         println!("Output: {}", outfile.display());
-        println!("Whisper model: {:?}", whisper_model);
+        println!(
+            "Whisper model: {:?} (exists: {})",
+            whisper_model, model_exists
+        );
+        println!(
+            "whisper-stream: {:?} (exists: {})",
+            whisper_stream_bin, stream_exists
+        );
         println!("Whisper backend: {}", backend);
         if let Ok(lang) = language.lock() {
             println!("Language: {}", *lang);
@@ -145,30 +180,47 @@ fn main() -> Result<()> {
         mic_cmd_path.as_deref(),
         &outfile,
         args.duration,
-        audio_level.clone(),
         recent_logs.clone(),
         args.debug,
-        want_transcript,
     )?;
 
-    // Start transcription reader if a model is provided
+    // Start transcription supervisor if a model and binary are provided
     let mut transcript_handle = None;
+    let mut mix_handle: Option<TranscriptionMix> = None;
     if want_transcript {
-        if let Some(stdout) = child.stdout.take() {
-            if let Some(model_path) = whisper_model.clone() {
-                transcript_handle = Some(start_transcriber(
-                    stdout,
-                    model_path,
-                    language.clone(),
-                    transcript.clone(),
-                    transcription_flag.clone(),
-                    transcription_stop.clone(),
-                    backend.clone(),
-                    base_offset_ms.clone(),
-                    transcription_reset.clone(),
-                    whisper_threads,
-                ));
-            }
+        let trans_source = if let Some(mix) =
+            setup_mix_source(&monitor, source_name.as_deref(), recent_logs.clone())
+        {
+            let src = mix.source.clone();
+            mix_handle = Some(mix);
+            src
+        } else {
+            monitor.clone()
+        };
+
+        if let (Some(model_path), Some(bin_path)) =
+            (whisper_model.clone(), whisper_stream_bin.clone())
+        {
+            transcript_handle = Some(start_transcriber(
+                model_path,
+                bin_path,
+                trans_source,
+                language.clone(),
+                transcript.clone(),
+                recent_logs.clone(),
+                transcription_flag.clone(),
+                transcription_stop.clone(),
+                base_offset_ms.clone(),
+                transcription_reset.clone(),
+                whisper_threads,
+            ));
+        }
+    } else if let Ok(mut logs) = recent_logs.lock() {
+        if !model_exists {
+            logs.push("Transcription disabled: whisper model not found".into());
+        }
+        if !stream_exists {
+            logs.push("Transcription disabled: whisper-stream binary not found".into());
         }
     }
 
@@ -187,11 +239,11 @@ fn main() -> Result<()> {
         monitor_source: monitor,
         mic_source: source_name,
         git_rev: git_revision(),
-        audio_level,
         markers: Vec::new(),
         recent_logs,
         transcript,
         transcription_active: false,
+        transcription_available: want_transcript,
         transcription_flag,
         transcription_stop: transcription_stop.clone(),
         transcription_reset,
@@ -208,6 +260,7 @@ fn main() -> Result<()> {
     if let Some(handle) = transcript_handle {
         let _ = handle.join();
     }
+    drop(mix_handle); // unload loopback modules if created
 
     // Cleanup command file
     if let Some(path) = &res.as_ref().ok().and_then(|s| s.mic_cmd_file.as_ref()) {
@@ -276,10 +329,4 @@ fn save_transcript_csv(state: &RecorderState, outfile: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn format_timecode(ms: i64) -> String {
-    let h = ms / 3_600_000;
-    let m = (ms / 60_000) % 60;
-    let s = (ms / 1000) % 60;
-    let ms = ms % 1000;
-    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, ms)
-}
+use crate::util::format_timecode;

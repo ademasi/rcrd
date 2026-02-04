@@ -21,8 +21,9 @@ use ratatui::{
 };
 
 use crate::Marker;
-use crate::ffmpeg::{Levels, write_mic_volume};
+use crate::ffmpeg::write_mic_volume;
 use crate::transcript::TransSegment;
+use crate::util::format_timecode;
 
 pub struct RecorderState {
     pub start_time: Instant,
@@ -34,11 +35,11 @@ pub struct RecorderState {
     pub monitor_source: String,
     pub mic_source: Option<String>,
     pub git_rev: Option<String>,
-    pub audio_level: Arc<Mutex<Levels>>,
     pub markers: Vec<Marker>,
     pub recent_logs: Arc<Mutex<Vec<String>>>,
     pub transcript: Arc<Mutex<Vec<TransSegment>>>,
     pub transcription_active: bool,
+    pub transcription_available: bool,
     pub transcription_flag: Arc<AtomicBool>,
     pub transcription_stop: Arc<AtomicBool>,
     pub transcription_reset: Arc<AtomicBool>,
@@ -102,7 +103,7 @@ fn run_loop<B: Backend>(
                         });
                     }
                     KeyCode::Char('t') => {
-                        if state.whisper_model.is_some() {
+                        if state.transcription_available {
                             state.transcription_active = !state.transcription_active;
                             state
                                 .transcription_flag
@@ -120,7 +121,7 @@ fn run_loop<B: Backend>(
                                 state.transcription_reset.store(true, Ordering::Relaxed);
                             }
                         } else if let Ok(mut logs) = state.recent_logs.lock() {
-                            logs.push("Transcription model not configured".into());
+                            logs.push("Transcription not available (missing model or whisper-stream path)".into());
                         }
                     }
                     KeyCode::Char('l') => {
@@ -260,7 +261,7 @@ Rev : {}",
     f.render_widget(status_p, chunks[2]);
 
     let controls = Paragraph::new(
-        "Controls: q / Esc / Ctrl+C = Quit   m = Mute/Unmute mic   b = Add marker   t = Toggle live transcript   l = Toggle lang (en/fr)\n\
+        "Controls: q / Esc / Ctrl+C = Quit   m = Mute/Unmute mic   b = Add marker   t = Toggle live transcript (needs model + whisper-stream)   l = Toggle lang (en/fr)\n\
          Files: output OGG in cwd; markers .json beside it\n\
          Devices: monitor from default sink, mic from default source (or --no-mic)",
     )
@@ -268,18 +269,14 @@ Rev : {}",
     .block(Block::default().title(" Controls ").borders(Borders::ALL));
     f.render_widget(controls, chunks[3]);
 
-    if state.transcription_active && state.whisper_model.is_some() {
+    if state.transcription_active && state.transcription_available {
         let lines = if let Ok(t) = state.transcript.lock() {
             let len = t.len();
             let start = len.saturating_sub(10);
             t.iter()
                 .skip(start)
                 .map(|seg| {
-                    let h = seg.start_ms / 3_600_000;
-                    let m = (seg.start_ms / 60_000) % 60;
-                    let s = (seg.start_ms / 1000) % 60;
-                    let ms = seg.start_ms % 1000;
-                    format!("{:02}:{:02}:{:02}.{:03} {}", h, m, s, ms, seg.text)
+                    format!("{} {}", format_timecode(seg.start_ms), seg.text)
                 })
                 .collect::<Vec<_>>()
         } else {

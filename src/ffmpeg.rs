@@ -7,6 +7,8 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
+use crate::util::push_log;
+
 pub fn prepare_mic_control() -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("rcrd-mic");
     fs::create_dir_all(&dir)?;
@@ -92,12 +94,7 @@ pub fn spawn_ffmpeg(
 
         for line in reader.lines() {
             if let Ok(l) = line {
-                if let Ok(mut logs) = recent_logs.lock() {
-                    if logs.len() >= 10 {
-                        logs.remove(0);
-                    }
-                    logs.push(l.clone());
-                }
+                push_log(&recent_logs, l);
             }
         }
     });
