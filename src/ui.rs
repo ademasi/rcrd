@@ -23,7 +23,7 @@ use ratatui::{
 use crate::Marker;
 use crate::ffmpeg::write_mic_volume;
 use crate::transcript::TransSegment;
-use crate::util::format_timecode;
+use crate::util::{format_timecode, ui as ui_const};
 
 pub struct RecorderState {
     pub start_time: Instant,
@@ -77,7 +77,7 @@ fn run_loop<B: Backend>(
     loop {
         terminal.draw(|f| ui(f, state))?;
 
-        if event::poll(Duration::from_millis(50))? {
+        if event::poll(Duration::from_millis(ui_const::POLL_INTERVAL_MS))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {

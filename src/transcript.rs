@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::util::push_log;
+use crate::util::{push_log, transcription as trans_const};
 
 #[derive(Clone, Debug, Default)]
 pub struct TransSegment {
@@ -56,11 +56,11 @@ pub fn start_transcriber(
                 "-t",
                 &threads.to_string(),
                 "-vth",
-                "0.75",
+                trans_const::VOICE_THRESHOLD,
                 "--length",
-                "30000",
+                trans_const::SEGMENT_LENGTH_MS,
                 "--step",
-                "0",
+                trans_const::SEGMENT_STEP,
                 "-l",
                 &lang,
             ]);

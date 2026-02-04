@@ -149,7 +149,7 @@ fn main() -> Result<()> {
         .map(|p| p.exists())
         .unwrap_or(false);
     let want_transcript = model_exists && stream_exists;
-    let whisper_threads = 8;
+    let whisper_threads = transcription::DEFAULT_THREADS;
 
     if args.debug {
         println!("Debug mode enabled.");
@@ -329,4 +329,4 @@ fn save_transcript_csv(state: &RecorderState, outfile: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-use crate::util::format_timecode;
+use crate::util::{format_timecode, transcription};

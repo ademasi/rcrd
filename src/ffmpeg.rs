@@ -7,7 +7,7 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
-use crate::util::push_log;
+use crate::util::{audio, push_log};
 
 pub fn prepare_mic_control() -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("rcrd-mic");
@@ -72,7 +72,14 @@ pub fn spawn_ffmpeg(
     cmd.args(["-map", "[out_file]"]);
 
     cmd.args([
-        "-ac", "2", "-ar", "48000", "-c:a", "libopus", "-b:a", "128k",
+        "-ac",
+        &audio::CHANNELS.to_string(),
+        "-ar",
+        &audio::SAMPLE_RATE.to_string(),
+        "-c:a",
+        "libopus",
+        "-b:a",
+        audio::BITRATE,
     ]);
     cmd.arg(outfile);
 
