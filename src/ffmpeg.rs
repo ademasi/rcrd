@@ -60,11 +60,10 @@ pub fn spawn_ffmpeg(
 
         format!(
             "[1:a]asendcmd={mic_cmd},volume@micvol=volume=1.0[mic];\
-             [0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3[mix]"
+             [0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3[out_file]"
         )
     } else {
-        String::from("[0:a]"
-        )
+        String::from("[0:a]anull[out_file]")
     };
 
     cmd.args(["-filter_complex", &filter_complex]);
@@ -84,7 +83,9 @@ pub fn spawn_ffmpeg(
 
     let mut child = cmd.spawn().context("failed to spawn ffmpeg")?;
 
-    let stderr = child.stderr.take().expect("failed to capture stderr");
+    let Some(stderr) = child.stderr.take() else {
+        return Ok(child);
+    };
 
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
