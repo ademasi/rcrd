@@ -10,12 +10,12 @@ mod util;
 
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use serde::Serialize;
 
@@ -169,6 +169,9 @@ fn main() -> Result<()> {
         }
     }
 
+    // Pre-flight check: ensure sufficient disk space
+    check_disk_space(&outfile, MIN_DISK_SPACE_MB)?;
+
     let ffmpeg_config = FfmpegConfig {
         monitor: &monitor,
         mic: source_name.as_deref(),
@@ -254,17 +257,22 @@ fn main() -> Result<()> {
     if let Ok(final_state) = &res {
         if !final_state.markers.is_empty() {
             let marker_file = final_state.output_file.with_extension("json");
-            if let Ok(f) = File::create(&marker_file) {
-                let _ = serde_json::to_writer_pretty(f, &final_state.markers);
-                println!(
-                    "Saved {} markers to {}",
-                    final_state.markers.len(),
-                    marker_file.display()
-                );
+            match File::create(&marker_file) {
+                Ok(f) => match serde_json::to_writer_pretty(f, &final_state.markers) {
+                    Ok(_) => println!(
+                        "Saved {} markers to {}",
+                        final_state.markers.len(),
+                        marker_file.display()
+                    ),
+                    Err(e) => eprintln!("Warning: Failed to write markers: {}", e),
+                },
+                Err(e) => eprintln!("Warning: Could not create {}: {}", marker_file.display(), e),
             }
         }
         if args.save_transcript {
-            save_transcript_csv(final_state, &outfile)?;
+            if let Err(e) = save_transcript_csv(final_state, &outfile) {
+                eprintln!("Warning: Failed to save transcript: {}", e);
+            }
         }
     }
 
@@ -291,7 +299,7 @@ fn ensure_child_stopped(child: &mut Child) {
     }
 }
 
-fn save_transcript_csv(state: &RecorderState, outfile: &PathBuf) -> Result<()> {
+fn save_transcript_csv(state: &RecorderState, outfile: &Path) -> Result<()> {
     let transcript = match state.shared.transcript.lock() {
         Ok(t) => t.clone(),
         Err(_) => Vec::new(),
@@ -313,3 +321,20 @@ fn save_transcript_csv(state: &RecorderState, outfile: &PathBuf) -> Result<()> {
 }
 
 use crate::util::{format_timecode, transcription};
+
+const MIN_DISK_SPACE_MB: u64 = 100;
+
+fn check_disk_space(path: &Path, min_mb: u64) -> Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let stat = nix::sys::statvfs::statvfs(parent).context("Failed to check disk space")?;
+    let free_mb = (stat.blocks_available() as u64 * stat.block_size() as u64) / (1024 * 1024);
+    if free_mb < min_mb {
+        anyhow::bail!(
+            "Insufficient disk space: {} MB available, {} MB recommended. \
+             Free up space or use --output to specify a different location.",
+            free_mb,
+            min_mb
+        );
+    }
+    Ok(())
+}

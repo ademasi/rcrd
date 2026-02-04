@@ -85,7 +85,7 @@ pub fn spawn_ffmpeg(config: FfmpegConfig<'_>, logs: Arc<Mutex<Vec<String>>>) -> 
 
     if config.debug {
         println!("FFmpeg command: {:?}", cmd);
-        return Ok(cmd.spawn().context("failed to spawn ffmpeg")?);
+        return cmd.spawn().context("failed to spawn ffmpeg");
     }
 
     cmd.stderr(Stdio::piped());
@@ -99,10 +99,8 @@ pub fn spawn_ffmpeg(config: FfmpegConfig<'_>, logs: Arc<Mutex<Vec<String>>>) -> 
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
 
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                push_log(&logs, l);
-            }
+        for l in reader.lines().map_while(Result::ok) {
+            push_log(&logs, l);
         }
     });
 

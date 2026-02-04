@@ -11,9 +11,18 @@ pub struct Defaults {
 pub fn detect_defaults() -> Result<Defaults> {
     let output = Command::new("pw-dump")
         .output()
-        .context("pw-dump failed (is pipewire-utils installed?)")?;
+        .context(
+            "pw-dump failed. Ensure pipewire-utils is installed.\n\
+             Try: --sink <name> --source <name> to specify devices manually.\n\
+             Run: pw-dump | grep node.name to list available devices.",
+        )?;
     if !output.status.success() {
-        return Err(anyhow!("pw-dump exited with {}", output.status));
+        return Err(anyhow!(
+            "pw-dump exited with {}.\n\
+             Try: --sink <name> --source <name> to specify devices manually.\n\
+             Run: pw-dump | grep node.name to list available devices.",
+            output.status
+        ));
     }
     let root: Value =
         serde_json::from_slice(&output.stdout).context("pw-dump returned invalid JSON")?;
@@ -61,9 +70,7 @@ pub fn detect_defaults() -> Result<Defaults> {
 }
 
 fn extract_name(val: Option<&Value>) -> Option<String> {
-    let Some(val) = val else {
-        return None;
-    };
+    let val = val?;
     if let Some(s) = val.as_str() {
         return Some(s.to_owned());
     }
