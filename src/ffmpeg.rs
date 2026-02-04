@@ -9,6 +9,15 @@ use anyhow::{Context, Result};
 
 use crate::util::{audio, push_log};
 
+pub struct FfmpegConfig<'a> {
+    pub monitor: &'a str,
+    pub mic: Option<&'a str>,
+    pub mic_cmd_path: Option<&'a Path>,
+    pub outfile: &'a Path,
+    pub duration: Option<u32>,
+    pub debug: bool,
+}
+
 pub fn prepare_mic_control() -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("rcrd-mic");
     fs::create_dir_all(&dir)?;
@@ -34,27 +43,18 @@ pub fn write_mic_volume(cmd_path: &Path, volume: f32) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_ffmpeg(
-    monitor: &str,
-    mic: Option<&str>,
-    mic_cmd_path: Option<&Path>,
-    outfile: &Path,
-    duration: Option<u32>,
-    recent_logs: Arc<Mutex<Vec<String>>>,
-    debug: bool,
-) -> Result<Child> {
+pub fn spawn_ffmpeg(config: FfmpegConfig<'_>, logs: Arc<Mutex<Vec<String>>>) -> Result<Child> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-nostdin", "-y"]);
-    if let Some(d) = duration {
+    if let Some(d) = config.duration {
         cmd.args(["-t", &d.to_string()]);
     }
 
-    cmd.args(["-f", "pulse", "-i", monitor]);
+    cmd.args(["-f", "pulse", "-i", config.monitor]);
 
-    let filter_complex = if let Some(mic_name) = mic {
+    let filter_complex = if let Some(mic_name) = config.mic {
         cmd.args(["-f", "pulse", "-i", mic_name]);
-        let mic_cmd = if let Some(cmd_path) = mic_cmd_path {
+        let mic_cmd = if let Some(cmd_path) = config.mic_cmd_path {
             format!("filename={}", cmd_path.display())
         } else {
             String::from("filename=")
@@ -81,9 +81,9 @@ pub fn spawn_ffmpeg(
         "-b:a",
         audio::BITRATE,
     ]);
-    cmd.arg(outfile);
+    cmd.arg(config.outfile);
 
-    if debug {
+    if config.debug {
         println!("FFmpeg command: {:?}", cmd);
         return Ok(cmd.spawn().context("failed to spawn ffmpeg")?);
     }
@@ -101,7 +101,7 @@ pub fn spawn_ffmpeg(
 
         for line in reader.lines() {
             if let Ok(l) = line {
-                push_log(&recent_logs, l);
+                push_log(&logs, l);
             }
         }
     });

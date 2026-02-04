@@ -22,10 +22,10 @@ use serde::Serialize;
 use crate::audio_mix::{setup_mix_source, TranscriptionMix};
 use crate::config::{config_path, load_config, Config};
 use crate::devices::detect_defaults;
-use crate::ffmpeg::{prepare_mic_control, spawn_ffmpeg};
+use crate::ffmpeg::{prepare_mic_control, spawn_ffmpeg, FfmpegConfig};
 use crate::output::{default_output_name, git_revision};
 use crate::state::SharedState;
-use crate::transcript::start_transcriber;
+use crate::transcript::{start_transcriber, TranscriberConfig};
 use crate::ui::{RecorderState, run_app};
 
 /// Record a call (Teams, Zoom, etc.) by tapping the current PipeWire sink monitor and microphone.
@@ -169,15 +169,15 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut child = spawn_ffmpeg(
-        &monitor,
-        source_name.as_deref(),
-        mic_cmd_path.as_deref(),
-        &outfile,
-        args.duration,
-        shared.logs.clone(),
-        args.debug,
-    )?;
+    let ffmpeg_config = FfmpegConfig {
+        monitor: &monitor,
+        mic: source_name.as_deref(),
+        mic_cmd_path: mic_cmd_path.as_deref(),
+        outfile: &outfile,
+        duration: args.duration,
+        debug: args.debug,
+    };
+    let mut child = spawn_ffmpeg(ffmpeg_config, shared.logs.clone())?;
 
     // Start transcription supervisor if a model and binary are provided
     let mut transcript_handle = None;
@@ -196,19 +196,13 @@ fn main() -> Result<()> {
         if let (Some(model_path), Some(bin_path)) =
             (whisper_model.clone(), whisper_stream_bin.clone())
         {
-            transcript_handle = Some(start_transcriber(
+            let transcriber_config = TranscriberConfig {
                 model_path,
-                bin_path,
-                trans_source,
-                shared.language.clone(),
-                shared.transcript.clone(),
-                shared.logs.clone(),
-                shared.transcription_active.clone(),
-                shared.transcription_stop.clone(),
-                shared.base_offset_ms.clone(),
-                shared.transcription_reset.clone(),
-                whisper_threads,
-            ));
+                binary_path: bin_path,
+                pulse_source: trans_source,
+                threads: whisper_threads,
+            };
+            transcript_handle = Some(start_transcriber(transcriber_config, shared.clone()));
         }
     } else if let Ok(mut logs) = shared.logs.lock() {
         if !model_exists {
