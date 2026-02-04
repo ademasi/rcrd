@@ -1,8 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -22,7 +21,7 @@ use ratatui::{
 
 use crate::Marker;
 use crate::ffmpeg::write_mic_volume;
-use crate::transcript::TransSegment;
+use crate::state::SharedState;
 use crate::util::{format_timecode, ui as ui_const};
 
 pub struct RecorderState {
@@ -36,15 +35,9 @@ pub struct RecorderState {
     pub mic_source: Option<String>,
     pub git_rev: Option<String>,
     pub markers: Vec<Marker>,
-    pub recent_logs: Arc<Mutex<Vec<String>>>,
-    pub transcript: Arc<Mutex<Vec<TransSegment>>>,
+    pub shared: SharedState,
     pub transcription_active: bool,
     pub transcription_available: bool,
-    pub transcription_flag: Arc<AtomicBool>,
-    pub transcription_stop: Arc<AtomicBool>,
-    pub transcription_reset: Arc<AtomicBool>,
-    pub base_offset_ms: Arc<std::sync::atomic::AtomicI64>,
-    pub language: Arc<Mutex<String>>,
     pub whisper_model: Option<PathBuf>,
 }
 
@@ -82,11 +75,11 @@ fn run_loop<B: Backend>(
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         state.running = false;
-                        state.transcription_stop.store(true, Ordering::Relaxed);
+                        state.shared.transcription_stop.store(true, Ordering::Relaxed);
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         state.running = false;
-                        state.transcription_stop.store(true, Ordering::Relaxed);
+                        state.shared.transcription_stop.store(true, Ordering::Relaxed);
                     }
                     KeyCode::Char('m') => {
                         if let Some(cmd_path) = &state.mic_cmd_file {
@@ -106,7 +99,8 @@ fn run_loop<B: Backend>(
                         if state.transcription_available {
                             state.transcription_active = !state.transcription_active;
                             state
-                                .transcription_flag
+                                .shared
+                                .transcription_active
                                 .store(state.transcription_active, Ordering::Relaxed);
                             if state.transcription_active {
                                 let elapsed_ms = state
@@ -116,22 +110,23 @@ fn run_loop<B: Backend>(
                                     .try_into()
                                     .unwrap_or(0);
                                 state
+                                    .shared
                                     .base_offset_ms
-                                    .store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
-                                state.transcription_reset.store(true, Ordering::Relaxed);
+                                    .store(elapsed_ms, Ordering::Relaxed);
+                                state.shared.transcription_reset.store(true, Ordering::Relaxed);
                             }
-                        } else if let Ok(mut logs) = state.recent_logs.lock() {
+                        } else if let Ok(mut logs) = state.shared.logs.lock() {
                             logs.push("Transcription not available (missing model or whisper-stream path)".into());
                         }
                     }
                     KeyCode::Char('l') => {
-                        if let Ok(mut lang) = state.language.lock() {
+                        if let Ok(mut lang) = state.shared.language.lock() {
                             *lang = if *lang == "en" {
                                 "fr".into()
                             } else {
                                 "en".into()
                             };
-                            if let Ok(mut logs) = state.recent_logs.lock() {
+                            if let Ok(mut logs) = state.shared.logs.lock() {
                                 logs.push(format!("Language set to {}", *lang));
                             }
                         }
@@ -160,7 +155,7 @@ fn run_loop<B: Backend>(
             break;
         }
     }
-    state.transcription_stop.store(true, Ordering::Relaxed);
+    state.shared.transcription_stop.store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -270,7 +265,7 @@ Rev : {}",
     f.render_widget(controls, chunks[3]);
 
     if state.transcription_active && state.transcription_available {
-        let lines = if let Ok(t) = state.transcript.lock() {
+        let lines = if let Ok(t) = state.shared.transcript.lock() {
             let len = t.len();
             let start = len.saturating_sub(10);
             t.iter()
@@ -296,7 +291,7 @@ Rev : {}",
             );
         f.render_widget(transcript, chunks[4]);
     } else {
-        let log_lines = if let Ok(logs) = state.recent_logs.lock() {
+        let log_lines = if let Ok(logs) = state.shared.logs.lock() {
             let len = logs.len();
             let start = len.saturating_sub(10);
             logs.iter().skip(start).cloned().collect::<Vec<_>>()

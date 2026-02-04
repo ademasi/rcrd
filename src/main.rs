@@ -3,6 +3,7 @@ mod config;
 mod devices;
 mod ffmpeg;
 mod output;
+mod state;
 mod transcript;
 mod ui;
 mod util;
@@ -11,8 +12,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -24,7 +24,8 @@ use crate::config::{config_path, load_config, Config};
 use crate::devices::detect_defaults;
 use crate::ffmpeg::{prepare_mic_control, spawn_ffmpeg};
 use crate::output::{default_output_name, git_revision};
-use crate::transcript::{TransSegment, start_transcriber};
+use crate::state::SharedState;
+use crate::transcript::start_transcriber;
 use crate::ui::{RecorderState, run_app};
 
 /// Record a call (Teams, Zoom, etc.) by tapping the current PipeWire sink monitor and microphone.
@@ -121,12 +122,11 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let recent_logs = Arc::new(Mutex::new(Vec::new()));
-    let transcript = Arc::new(Mutex::new(Vec::<TransSegment>::new()));
-    let transcription_flag = Arc::new(AtomicBool::new(false));
-    let transcription_stop = Arc::new(AtomicBool::new(false));
-    let transcription_reset = Arc::new(AtomicBool::new(false));
-    let base_offset_ms = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let language_str = args
+        .lang
+        .or(cfg.language.clone())
+        .unwrap_or_else(|| "en".into());
+    let shared = SharedState::new(language_str);
     let whisper_model = args.model.or(cfg.whisper_model.clone());
     let whisper_stream_bin = args
         .whisper_stream
@@ -135,11 +135,6 @@ fn main() -> Result<()> {
         .backend
         .or(Some(cfg.backend.clone()))
         .unwrap_or_else(|| "vulkan".into());
-    let language = Arc::new(Mutex::new(
-        args.lang
-            .or(cfg.language.clone())
-            .unwrap_or_else(|| "en".into()),
-    ));
     let model_exists = whisper_model
         .as_ref()
         .map(|p| p.exists())
@@ -166,7 +161,7 @@ fn main() -> Result<()> {
             whisper_stream_bin, stream_exists
         );
         println!("Whisper backend: {}", backend);
-        if let Ok(lang) = language.lock() {
+        if let Ok(lang) = shared.language.lock() {
             println!("Language: {}", *lang);
         }
         if want_transcript {
@@ -180,7 +175,7 @@ fn main() -> Result<()> {
         mic_cmd_path.as_deref(),
         &outfile,
         args.duration,
-        recent_logs.clone(),
+        shared.logs.clone(),
         args.debug,
     )?;
 
@@ -189,7 +184,7 @@ fn main() -> Result<()> {
     let mut mix_handle: Option<TranscriptionMix> = None;
     if want_transcript {
         let trans_source = if let Some(mix) =
-            setup_mix_source(&monitor, source_name.as_deref(), recent_logs.clone())
+            setup_mix_source(&monitor, source_name.as_deref(), shared.logs.clone())
         {
             let src = mix.source.clone();
             mix_handle = Some(mix);
@@ -205,17 +200,17 @@ fn main() -> Result<()> {
                 model_path,
                 bin_path,
                 trans_source,
-                language.clone(),
-                transcript.clone(),
-                recent_logs.clone(),
-                transcription_flag.clone(),
-                transcription_stop.clone(),
-                base_offset_ms.clone(),
-                transcription_reset.clone(),
+                shared.language.clone(),
+                shared.transcript.clone(),
+                shared.logs.clone(),
+                shared.transcription_active.clone(),
+                shared.transcription_stop.clone(),
+                shared.base_offset_ms.clone(),
+                shared.transcription_reset.clone(),
                 whisper_threads,
             ));
         }
-    } else if let Ok(mut logs) = recent_logs.lock() {
+    } else if let Ok(mut logs) = shared.logs.lock() {
         if !model_exists {
             logs.push("Transcription disabled: whisper model not found".into());
         }
@@ -240,15 +235,9 @@ fn main() -> Result<()> {
         mic_source: source_name,
         git_rev: git_revision(),
         markers: Vec::new(),
-        recent_logs,
-        transcript,
+        shared: shared.clone(),
         transcription_active: false,
         transcription_available: want_transcript,
-        transcription_flag,
-        transcription_stop: transcription_stop.clone(),
-        transcription_reset,
-        base_offset_ms,
-        language,
         whisper_model,
     };
 
@@ -256,7 +245,7 @@ fn main() -> Result<()> {
 
     // Ensure FFmpeg is dead
     ensure_child_stopped(&mut child);
-    transcription_stop.store(true, Ordering::Relaxed);
+    shared.transcription_stop.store(true, Ordering::Relaxed);
     if let Some(handle) = transcript_handle {
         let _ = handle.join();
     }
@@ -309,7 +298,7 @@ fn ensure_child_stopped(child: &mut Child) {
 }
 
 fn save_transcript_csv(state: &RecorderState, outfile: &PathBuf) -> Result<()> {
-    let transcript = match state.transcript.lock() {
+    let transcript = match state.shared.transcript.lock() {
         Ok(t) => t.clone(),
         Err(_) => Vec::new(),
     };
