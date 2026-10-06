@@ -7,6 +7,17 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
+use crate::util::{audio, push_log};
+
+pub struct FfmpegConfig<'a> {
+    pub monitor: &'a str,
+    pub mic: Option<&'a str>,
+    pub mic_cmd_path: Option<&'a Path>,
+    pub outfile: &'a Path,
+    pub duration: Option<u32>,
+    pub debug: bool,
+}
+
 pub fn prepare_mic_control() -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("rcrd-mic");
     fs::create_dir_all(&dir)?;
@@ -32,27 +43,15 @@ pub fn write_mic_volume(cmd_path: &Path, volume: f32) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_ffmpeg(
-    monitor: &str,
-    mic: Option<&str>,
-    mic_cmd_path: Option<&Path>,
-    outfile: &Path,
-    duration: Option<u32>,
-    recent_logs: Arc<Mutex<Vec<String>>>,
-    debug: bool,
-) -> Result<Child> {
+pub fn spawn_ffmpeg(config: FfmpegConfig<'_>, logs: Arc<Mutex<Vec<String>>>) -> Result<Child> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-nostdin", "-y"]);
-    if let Some(d) = duration {
-        cmd.args(["-t", &d.to_string()]);
-    }
 
-    cmd.args(["-f", "pulse", "-i", monitor]);
+    cmd.args(["-f", "pulse", "-i", config.monitor]);
 
-    let filter_complex = if let Some(mic_name) = mic {
+    let filter_complex = if let Some(mic_name) = config.mic {
         cmd.args(["-f", "pulse", "-i", mic_name]);
-        let mic_cmd = if let Some(cmd_path) = mic_cmd_path {
+        let mic_cmd = if let Some(cmd_path) = config.mic_cmd_path {
             format!("filename={}", cmd_path.display())
         } else {
             String::from("filename=")
@@ -60,44 +59,50 @@ pub fn spawn_ffmpeg(
 
         format!(
             "[1:a]asendcmd={mic_cmd},volume@micvol=volume=1.0[mic];\
-             [0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3[mix]"
+             [0:a][mic]amix=inputs=2:duration=longest:dropout_transition=3[out_file]"
         )
     } else {
-        String::from("[0:a]"
-        )
+        String::from("[0:a]anull[out_file]")
     };
 
     cmd.args(["-filter_complex", &filter_complex]);
     cmd.args(["-map", "[out_file]"]);
 
     cmd.args([
-        "-ac", "2", "-ar", "48000", "-c:a", "libopus", "-b:a", "128k",
+        "-ac",
+        &audio::CHANNELS.to_string(),
+        "-ar",
+        &audio::SAMPLE_RATE.to_string(),
+        "-c:a",
+        "libopus",
+        "-b:a",
+        audio::BITRATE,
     ]);
-    cmd.arg(outfile);
+    // -t must be an output option: as an input option it only limits the
+    // monitor stream, and amix duration=longest then runs on mic input forever.
+    if let Some(d) = config.duration {
+        cmd.args(["-t", &d.to_string()]);
+    }
+    cmd.arg(config.outfile);
 
-    if debug {
+    if config.debug {
         println!("FFmpeg command: {:?}", cmd);
-        return Ok(cmd.spawn().context("failed to spawn ffmpeg")?);
+        return cmd.spawn().context("failed to spawn ffmpeg");
     }
 
     cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn().context("failed to spawn ffmpeg")?;
 
-    let stderr = child.stderr.take().expect("failed to capture stderr");
+    let Some(stderr) = child.stderr.take() else {
+        return Ok(child);
+    };
 
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
 
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                if let Ok(mut logs) = recent_logs.lock() {
-                    if logs.len() >= 10 {
-                        logs.remove(0);
-                    }
-                    logs.push(l.clone());
-                }
-            }
+        for l in reader.lines().map_while(Result::ok) {
+            push_log(&logs, l);
         }
     });
 

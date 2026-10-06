@@ -1,7 +1,6 @@
 use std::path::PathBuf;
-use std::process::Command;
 
-pub fn default_output_name(prefix: &str) -> PathBuf {
+pub fn default_output_name(prefix: &str, name: Option<&str>) -> PathBuf {
     let tm = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let datetime = format!(
         "{:04}{:02}{:02}-{:02}{:02}{:02}",
@@ -12,17 +11,29 @@ pub fn default_output_name(prefix: &str) -> PathBuf {
         tm.minute(),
         tm.second()
     );
-    PathBuf::from(format!("{prefix}{datetime}.ogg"))
+    let suffix = name
+        .map(sanitize_name)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("-{s}"))
+        .unwrap_or_default();
+    PathBuf::from(format!("{prefix}{datetime}{suffix}.ogg"))
 }
 
-pub fn git_revision() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Make a user-provided label safe for filenames: whitespace becomes '-',
+/// anything that isn't alphanumeric/'-'/'_' is dropped, runs of '-' collapse.
+fn sanitize_name(name: &str) -> String {
+    let mapped: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_whitespace() { '-' } else { c })
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let mut out = String::with_capacity(mapped.len());
+    for c in mapped.chars() {
+        if c == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(c);
     }
-    let rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if rev.is_empty() { None } else { Some(rev) }
+    out.trim_matches('-').to_string()
 }
