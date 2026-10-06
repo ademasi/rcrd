@@ -46,9 +46,6 @@ pub fn write_mic_volume(cmd_path: &Path, volume: f32) -> Result<()> {
 pub fn spawn_ffmpeg(config: FfmpegConfig<'_>, logs: Arc<Mutex<Vec<String>>>) -> Result<Child> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-nostdin", "-y"]);
-    if let Some(d) = config.duration {
-        cmd.args(["-t", &d.to_string()]);
-    }
 
     cmd.args(["-f", "pulse", "-i", config.monitor]);
 
@@ -81,6 +78,11 @@ pub fn spawn_ffmpeg(config: FfmpegConfig<'_>, logs: Arc<Mutex<Vec<String>>>) -> 
         "-b:a",
         audio::BITRATE,
     ]);
+    // -t must be an output option: as an input option it only limits the
+    // monitor stream, and amix duration=longest then runs on mic input forever.
+    if let Some(d) = config.duration {
+        cmd.args(["-t", &d.to_string()]);
+    }
     cmd.arg(config.outfile);
 
     if config.debug {
